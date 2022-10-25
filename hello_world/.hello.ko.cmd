@@ -1,0 +1,1 @@
+cmd_/home/nesara/modules/hello_world/hello.ko := ld -r -m elf_x86_64  -z max-page-size=0x200000 -T ./scripts/module-common.lds --build-id  -o /home/nesara/modules/hello_world/hello.ko /home/nesara/modules/hello_world/hello.o /home/nesara/modules/hello_world/hello.mod.o

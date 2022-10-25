@@ -1,0 +1,102 @@
+#include <linux/init.h>
+#include <linux/kernel.h>
+#include <linux/module.h>
+#include <linux/slab.h>
+#include <linux/fs.h>
+#include <linux/interrupt.h>
+#include <asm/uaccess.h>
+#include <linux/wait.h>
+#include <linux/sched.h>
+
+#define MAX_SIZE 10
+#define MAX_LEN 5
+DECLARE_WAIT_QUEUE_HEAD(read_q);
+int ldd_major = 240;
+char *usr_buf;
+int r_head,w_head;
+
+int spacecheck(void){
+	if((r_head == w_head) || (r_head == MAX_SIZE))
+		return 0;
+	return 1;
+}
+
+
+int ldd_open(struct inode *inode, struct file *filp)
+{
+	if(!usr_buf)
+		usr_buf = kmalloc(MAX_SIZE * sizeof(char),GFP_KERNEL);
+	printk("Open file\n");
+
+	return nonseekable_open(inode, filp);
+}
+
+ssize_t ldd_read(struct file *fip, char __user *buf, size_t count, loff_t *offset)
+{
+	int retval = 0;
+	if(!usr_buf){
+		printk("%s:No space alloc \n",__func__);
+		return 0;
+	}
+	if(!spacecheck()){
+		printk("Nothing to read\n");
+		wait_event_interruptible(read_q, spacecheck());
+	}
+	printk("Read file\n");
+	count = MAX_LEN;
+	if(copy_to_user(buf,usr_buf+r_head,count)){
+		retval = -EFAULT;
+		goto out;	
+	}
+	printk("%s",usr_buf);
+	r_head += MAX_SIZE/2;
+out:
+	return retval;
+}
+
+ssize_t ldd_write(struct file *fip, const char __user *buf, size_t count, loff_t *offset)
+{
+	int err=0,retval = 0;
+	printk("write file\n");
+	if(!usr_buf){
+		printk("%s:No space alloc \n",__func__);
+		return 0;
+	}
+	r_head = w_head = 0;
+	count = MAX_SIZE;
+	err = copy_from_user(usr_buf, buf, count);
+	if(err) {
+		retval = -EFAULT;
+		printk(KERN_INFO"could not write %d bytes\n",err);
+		goto out;
+	}
+	w_head +=count;
+	printk("Waking up pending read\n");
+	wake_up_interruptible(&read_q);
+out:
+	return count;
+}
+
+int ldd_close(struct inode *inode, struct file *filp){
+	printk("close file\n");
+	return 0;
+}
+
+struct file_operations ldd_op = {
+	.owner = THIS_MODULE,
+	.open = ldd_open,
+	.read = ldd_read,
+	.write = ldd_write,
+	.release = ldd_close,
+};
+
+int ldd_init(void){
+	register_chrdev(ldd_major,"ldd",&ldd_op);
+	return 0;
+}
+void ldd_exit(void){
+	unregister_chrdev(ldd_major,"scull");
+}
+
+module_init(ldd_init);
+module_exit(ldd_exit);

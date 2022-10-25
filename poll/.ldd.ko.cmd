@@ -1,0 +1,1 @@
+cmd_/home/nesara/modules/poll/ldd.ko := ld -r -m elf_x86_64  -z max-page-size=0x200000 -T ./scripts/module-common.lds --build-id  -o /home/nesara/modules/poll/ldd.ko /home/nesara/modules/poll/ldd.o /home/nesara/modules/poll/ldd.mod.o

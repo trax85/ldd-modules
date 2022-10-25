@@ -1,0 +1,5 @@
+# ------- Modules Compiling ------------
+#export CC="/home/nesara/gnueabihf/bin/arm-cortex_a7-linux-gnueabihf-"
+export CC="/media/sf_UbuntuVM_Shared/gcc-linaro-6.5.0-2018.12-linux_linaro/bin/aarch64-linux-gnu-"
+make ARCH=arm CROSS_COMPILE=${CC}
+

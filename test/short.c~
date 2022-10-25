@@ -1,0 +1,115 @@
+#include <linux/module.h>
+#include <linux/init.h>
+#include <linux/kernel.h>
+#include <linux/interrupt.h>
+#include <linux/sched.h>
+#include <asm/uaccess.h>
+#include <linux/kdev_t.h>
+#include <linux/slab.h>
+#include <linux/fs.h>
+#include <linux/cdev.h>
+#include <linux/ioport.h>
+#include <linux/errno.h>	/* error codes */
+#include <asm/io.h>
+
+#define IRQ_NO 11
+#define SHORT_NR_PORTS 8
+unsigned long short_base = 0x378;
+dev_t dev = 0;
+static struct cdev c_dev;
+volatile int short_irq = 2;
+
+static irqreturn_t short_interrupt(int irq, void *dev_id)
+{
+	printk("Handled interrupt:%d\n",irq);
+	return IRQ_HANDLED;
+}
+
+static int short_open(struct inode *inode, struct file *filp)
+{
+	printk("short_open\n");
+	return 0;
+}
+
+
+static int short_release(struct inode *inode, struct file *filp)
+{
+    
+	printk("short_release\n");
+	return 0;
+}
+
+
+static ssize_t short_read(struct file *filp, char __user *buf, size_t count, loff_t *f_pos)
+{
+	printk("Read\n");
+	inb(short_base);
+	return 0;
+}
+static ssize_t short_write(struct file *filp, const char __user *buf, size_t count, loff_t *f_pos)
+{
+	int ret = 0;
+	char ch[10];
+	int written = 0, odd = *f_pos & 1;
+	printk("Write\n");
+	ret = copy_from_user(ch, buf, count);
+	outb(0xff * ((++written + odd) & 1), short_base);
+	return count;
+}
+
+
+struct file_operations short_ops = {
+	.owner	 = THIS_MODULE,
+	.read	 = short_read,
+	.write	 = short_write,
+	.open	 = short_open,
+	.release = short_release,
+};
+
+static int ldd_init(void)
+{
+	int err = 0, ret = 0;
+	dev = MKDEV(240,0);
+	
+	/* I/O port Resource allocation */
+	if (!request_region(short_base, SHORT_NR_PORTS, "short")) {
+		printk(KERN_INFO "short: can't get I/O port address 0x%lx\n",
+				short_base);
+		return -ENODEV;
+	}
+	
+	if((register_chrdev_region(dev,1,"short")) < 0){
+		printk("Failed to alloc chardev region\n");
+		return -1;	
+	}
+	cdev_init(&c_dev,&short_ops);
+	err = cdev_add(&c_dev,dev,1);
+	if( err < 0){
+		printk("Failed to add chardev\n");
+		goto out;	
+	}
+	if(request_irq(short_irq, short_interrupt, IRQF_SHARED, "short", (void *)(short_interrupt))){
+		printk(KERN_INFO "short: can't get assigned irq %d\n",
+					IRQ_NO);
+		short_irq = -1;
+	}
+	
+	printk("Init Done\n");
+	return 0;
+out:
+	release_region(short_base,SHORT_NR_PORTS);
+	cdev_del(&c_dev);
+	unregister_chrdev_region(dev,1);
+	return 0;
+}
+
+static void ldd_exit(void)
+{
+	release_region(short_base,SHORT_NR_PORTS);
+	free_irq(short_irq,(void *)short_interrupt);
+	cdev_del(&c_dev);
+	unregister_chrdev_region(dev,1);
+}
+module_init(ldd_init);
+module_exit(ldd_exit);
+MODULE_LICENSE("GPL");

@@ -1,0 +1,9 @@
+# enable debugging 
+DEBUG =y
+
+obj-m := ldd.o
+#KDIR := /home/nesara/BBB/board-support/linux-4.1.13+gitAUTOINC+8dc66170d9-g8dc6617
+all:
+	make -C /lib/modules/$(uname -r)/build M=$PWD modules
+clean:
+	make -C /lib/modules/$(uname -r)/build M=$PWD clean

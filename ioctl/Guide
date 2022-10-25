@@ -1,0 +1,8 @@
+all:
+make -C /lib/modules/$(uname -r)/build M=$PWD modules
+clean:
+make -C /lib/modules/$(uname -r)/build M=$PWD clean
+#make Node
+sudo mknod -m 666 /dev/ldd c 240 0
+
+#compile and execute the ioctl.c file to look at the dmesg

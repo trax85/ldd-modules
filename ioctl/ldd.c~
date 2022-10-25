@@ -1,0 +1,271 @@
+#include <linux/init.h>
+#include <linux/kernel.h>
+#include <linux/module.h>
+#include <linux/kdev_t.h>
+#include <linux/slab.h>
+#include <linux/fs.h>
+#include <linux/cdev.h>
+#include <linux/interrupt.h>
+#include <asm/uaccess.h>
+#include <linux/wait.h>
+#include <linux/sched.h>
+#include <linux/string.h>
+
+//8 bit number used as magic number to distinguish between ioctls
+#define LDDIO_MAGIC 'b'
+
+//First field is magic number, second is command num, third is data being passed
+//IO :without parameter, IOR: with read paramter, IOW: with write parameter
+#define LDDIO_RST_VAL _IO(LDDIO_MAGIC, 0)	
+#define LDDIO_R_VAL _IOR(LDDIO_MAGIC, 1, int)
+#define LDDIO_W_VAL _IOR(LDDIO_MAGIC, 2, int)
+#define LDDIO_R_BUFFER _IOR(LDDIO_MAGIC, 3, char)
+#define LDDIO_E_READVAL _IOW(LDDIO_MAGIC, 4, int) 
+#define LDDIO_E_WRITEVAL _IOW(LDDIO_MAGIC, 5, int)
+
+#define LDDIO_MAXNR 5
+
+#define MAX_LEN 10
+dev_t dev = 0;
+
+struct ldd_buf{
+	wait_queue_head_t readq, writeq;
+	char *buffer;
+	int write_idx, read_idx;
+	struct cdev c_dev;	
+};
+
+static struct ldd_buf *ldd_dev;
+
+int ldd_open(struct inode *inode, struct file *filp)
+{
+	printk("\nOpen file\n");
+	return 0;	
+}
+
+ssize_t ldd_read(struct file *filp, char __user *buf, size_t count, loff_t *offset)
+{
+	int retval = 0;
+	//Wait on queue if no data in buffer
+	printk("\n%s:read:%d write:%d\n",__func__,ldd_dev->read_idx, ldd_dev->write_idx);
+	
+	while(ldd_dev->write_idx == ldd_dev->read_idx){
+		printk("Nothing to read\n");
+		if (filp->f_flags & O_NONBLOCK)
+ 			return -EAGAIN;
+ 		printk("\"%s\" reading: going to sleep\n", current->comm);
+ 		if (wait_event_interruptible(ldd_dev->readq, (ldd_dev->write_idx == ldd_dev->read_idx)))
+			return -ERESTARTSYS; /* signal: tell the fs layer to handle it */
+	}
+	
+	//Wrap around if reached end
+	if(ldd_dev->read_idx == MAX_LEN)
+		ldd_dev->read_idx = 0;
+	//counts bytes until either end of buffer or till write index
+	count = ldd_dev->write_idx > ldd_dev->read_idx ? (
+			ldd_dev->write_idx - ldd_dev->read_idx) : (MAX_LEN - ldd_dev->read_idx);
+			
+	if(copy_to_user(buf,(ldd_dev->buffer + ldd_dev->read_idx),count)){
+		retval = -EFAULT;
+		goto out;	
+	}
+	printk("%s:read:%s\n",__func__,buf);
+	ldd_dev->read_idx +=count;
+	printk("read index:%d\n",ldd_dev->read_idx);
+	//wake up sleeping writers if any
+	wake_up_interruptible(&ldd_dev->writeq);
+	return 0;
+out:
+	return retval;
+}
+
+static int get_free_space(void)
+{
+	int count;
+	
+	if(ldd_dev->write_idx == (ldd_dev->read_idx - 1))
+		goto out;
+	if(MAX_LEN == (ldd_dev->write_idx - ldd_dev->read_idx))
+		goto out;
+		
+	//Wrap around if reached end
+	if(MAX_LEN == ldd_dev->write_idx)
+		ldd_dev->write_idx = 0;
+	count = ldd_dev->write_idx >= ldd_dev->read_idx ? 
+		(MAX_LEN - ldd_dev->write_idx) : (ldd_dev->read_idx - ldd_dev->write_idx - 1);
+	
+	return count;
+out:
+	printk("no space left\n");
+		return 0;
+}
+
+ssize_t ldd_write(struct file *filp, const char __user *buf, size_t count, loff_t *offset)
+{
+	int retval = 0, tmp, err;
+	//wait on queue if no space left on buffer
+	printk("\n%s:read:%d write:%d\n",__func__,ldd_dev->read_idx,ldd_dev->write_idx);
+	
+	while(!get_free_space()){
+		DEFINE_WAIT(ldd_wait);
+		printk("No space to write\n");
+		if (filp->f_flags & O_NONBLOCK)
+ 			return -EAGAIN;
+ 		printk("\"%s\" writing: going to sleep\n", current->comm);
+ 		prepare_to_wait(&ldd_dev->writeq, &ldd_wait, TASK_INTERRUPTIBLE);
+		if (!get_free_space())
+			schedule();
+		finish_wait(&ldd_dev->writeq, &ldd_wait);
+		if (signal_pending(current))
+			return -ERESTARTSYS; /* signal: tell the fs layer to handle it */
+	}
+	
+	//Get how much space is left in buffer
+	tmp = get_free_space();
+	if(count > tmp)
+		count = tmp;
+	err = copy_from_user((ldd_dev->buffer + ldd_dev->write_idx), buf, count);
+	if(err) {
+		retval = -EFAULT;
+		printk(KERN_INFO"could not write %d bytes\n",err);
+		goto out;
+	}
+	ldd_dev->write_idx += count;
+	printk("write index:%d\n",ldd_dev->write_idx);
+	
+	//Wakeup sleeping readers if any
+	wake_up_interruptible(&ldd_dev->readq);
+	return count;
+out:
+	return retval;
+}
+
+int ldd_close(struct inode *inode, struct file *filp){
+	printk("close file\n");
+	return 0;
+}
+
+static long ldd_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
+{
+	int err = 0,retval = 0,tmp;
+	printk("%s\n",__func__);
+	/*
+	* extract the type and number bitfields, and don't decode
+ 	* wrong cmds: return ENOTTY (inappropriate ioctl) before access_ok( )
+ 	*/
+	if(_IOC_TYPE(cmd) != LDDIO_MAGIC) return -ENOTTY;
+	if(_IOC_NR(cmd) > LDDIO_MAXNR) return -ENOTTY;
+	
+	/*
+	* the direction is a bitmask, and VERIFY_WRITE catches R/W
+	* transfers. `Type' is user-oriented, while
+	* access_ok is kernel-oriented, so the concept of "read" and
+	* "write" is reversed
+	*/
+	if(_IOC_DIR(cmd) & _IOC_READ)
+		err = !access_ok(VERIFY_WRITE,  (void __user *)arg, _IOC_SIZE(cmd));
+	if(_IOC_DIR(cmd) % _IOC_WRITE)
+		err = !access_ok(VERIFY_READ,  (void __user *)arg, _IOC_SIZE(cmd));
+	
+	if (err) return -EFAULT;
+	//Allow Administrator privilaged programs only
+	//if (! capable (CAP_SYS_ADMIN))
+ 	//	return -EPERM;
+ 	
+ 	switch(cmd) {
+ 		case LDDIO_RST_VAL:
+ 			printk("%s:Reset value\n",__func__);
+ 			ldd_dev->read_idx = ldd_dev->write_idx = 0;
+ 			break;
+ 		case LDDIO_R_VAL:
+ 			printk("%s:Read Read index\n",__func__);
+ 			retval = __put_user(ldd_dev->read_idx, (int __user *)arg);
+ 			break;
+ 		case LDDIO_W_VAL:
+ 			printk("%s:Read Write index\n",__func__);
+ 			retval =  __put_user(ldd_dev->write_idx, (int __user *)arg);
+ 			break;
+ 		case LDDIO_R_BUFFER:
+ 			printk("%s:Read Buffer\n",__func__);
+ 			tmp = strlen(ldd_dev->buffer);
+ 			retval = __put_user(tmp, (int __user *)arg);
+ 			break;
+ 		case LDDIO_E_READVAL:
+ 			printk("%s:Edit Read Index\n",__func__);
+ 			retval = __get_user(ldd_dev->read_idx, (int __user *)arg);
+			break;
+ 		case LDDIO_E_WRITEVAL:
+ 			printk("%s:Edit Write Index\n",__func__);
+ 			retval = __get_user(ldd_dev->write_idx, (int __user *)arg);
+ 		default:
+ 			return -ENOTTY; //Wont happen as it was checked against LDD_MAXNR
+ 		
+ 	}
+ 	return retval;
+}
+
+struct file_operations ldd_op = {
+	.owner = THIS_MODULE,
+	.open = ldd_open,
+	.read = ldd_read,
+	.write = ldd_write,
+	.release = ldd_close,
+	.unlocked_ioctl = ldd_ioctl,
+};
+
+static int ldd_buf_init(void)
+{
+	int retval = 0;
+	ldd_dev->buffer = kmalloc(10 * sizeof(char),GFP_KERNEL);
+	if(!ldd_dev->buffer){
+		printk("Memory allocationg failed\n");
+		retval = -ENOMEM;
+		goto out;
+	}
+	init_waitqueue_head(&ldd_dev->readq);
+	init_waitqueue_head(&ldd_dev->writeq);
+	ldd_dev->write_idx = ldd_dev->read_idx =  0;
+	return 0;
+out:
+	return retval;
+}
+
+int ldd_init(void)
+{
+	int retval = 0, err= 0;
+	dev = MKDEV(240,0);
+	if((register_chrdev_region(dev,1,"ldd")) < 0){
+		printk("Failed to alloc chardev region\n");
+		return -1;	
+	}
+	ldd_dev = kmalloc(sizeof(struct ldd_buf), GFP_KERNEL);
+	if(!ldd_dev)
+		goto end;
+	cdev_init(&ldd_dev->c_dev,&ldd_op);
+	err = cdev_add(&ldd_dev->c_dev,dev,1);
+	if( err < 0){
+		printk("Failed to add chardev\n");
+		goto out;	
+	}
+	if(ldd_buf_init()){
+		printk("Failed to initilize essential structure\n");
+		goto out;
+	}
+	printk("Init done\n");
+	return 0;
+out:
+	cdev_del(&ldd_dev->c_dev);
+	unregister_chrdev_region(dev,1);
+	return retval;
+end:
+	return -ENOMEM;
+}
+
+void ldd_exit(void){
+	cdev_del(&ldd_dev->c_dev);
+	unregister_chrdev_region(dev,1);
+}
+
+MODULE_LICENSE("Dual BSD/GPL");
+module_init(ldd_init);
+module_exit(ldd_exit);

@@ -1,0 +1,52 @@
+/*
+ Scull Driver
+*/
+
+#include <linux/init.h>
+#include <linux/kernel.h>
+#include <linux/module.h>
+#include <linux/moduleparam.h>
+#include <linux/errno.h>
+#include <linux/types.h>		//Needed for typedef dev_t
+#include <linux/kdev_t.h>
+#include <linux/fs.h>			//Needed for alloc and register chrdev 
+#include "scull.h"
+
+int scull_major = SCULL_MAJOR;
+int scull_minor = SCULL_MINOR;
+int scull_nr_devs = SCULL_NR_DEVS;
+
+module_param(scull_major,int,S_IRUGO);
+module_param(scull_minor,int,S_IRUGO);
+module_param(scull_nr_devs,int,S_IRUGO);
+
+MODULE_AUTHOR("Tejas Udupa");
+MODULE_LICENSE("Dual BSD/GPL");
+
+struct scull_dev *scull_devices;
+
+int scull_init(void){
+	int result;
+	dev_t dev;
+
+	if(scull_major){
+			//Combine major and minor into a 
+			dev = MKDEV(scull_major,scull_minor);
+			result = register_chrdev_region(dev,scull_nr_devs,"scull");
+	}else {
+		result = alloc_chrdev_region(&dev,scull_major,scull_nr_devs,"scull");
+		scull_major = MAJOR(dev);
+		scull_minor = MINOR(dev);
+		printk(KERN_NOTICE "scull major %d and minor %d",scull_major,scull_minor);
+	}
+	if(result < 0){
+		printk(KERN_WARNING "scull device cant get major %d\n",scull_major);
+		return result;
+	}
+	return 0;
+}
+int scull_remove(void){
+	return 0;
+};
+module_init(scull_init);
+module_exit(scull_remove);

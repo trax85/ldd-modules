@@ -1,0 +1,125 @@
+#include <linux/init.h>
+#include <linux/kernel.h>
+#include <linux/module.h>
+#include <linux/kdev_t.h>
+#include <linux/device.h>
+#include <linux/sysfs.h> 
+#include <linux/kobject.h> 
+#include <linux/slab.h>
+#include <linux/fs.h>
+#include <linux/cdev.h>
+#include <linux/interrupt.h>
+#include <asm/uaccess.h>
+#include <linux/wait.h>
+#include <linux/sched.h>
+
+dev_t dev = 0;
+volatile int ldd_value = 0;
+static struct class *dev_class;
+static struct cdev ldd_dev;
+struct kobject *kobj_ref;
+
+static ssize_t sysfs_show(struct kobject *kobj, 
+                struct kobj_attribute *attr, char *buf);
+static ssize_t sysfs_store(struct kobject *kobj, 
+                struct kobj_attribute *attr,const char *buf, size_t count);
+ 
+struct kobj_attribute ldd_attr = __ATTR(ldd_value, 0660, sysfs_show, sysfs_store);
+
+/*
+** This function will be called when we read the sysfs file
+*/  
+static ssize_t sysfs_show(struct kobject *kobj, 
+                struct kobj_attribute *attr, char *buf)
+{
+        printk(KERN_INFO "Sysfs - Read!!!\n");
+        return sprintf(buf, "%d", ldd_value);
+}
+/*
+** This function will be called when we write the sysfsfs file
+*/  
+static ssize_t sysfs_store(struct kobject *kobj, 
+                struct kobj_attribute *attr,const char *buf, size_t count)
+{
+        printk(KERN_INFO "Sysfs - Write!!!\n");
+        sscanf(buf,"%d",&ldd_value);
+        return count;
+}
+
+int ldd_open(struct inode *inode, struct file *filp)
+{
+	return nonseekable_open(inode, filp);
+}
+
+ssize_t ldd_read(struct file *fip, char __user *buf, size_t count, loff_t *offset)
+{
+	
+	return 0;
+}
+
+ssize_t ldd_write(struct file *fip, const char __user *buf, size_t count, loff_t *offset)
+{
+	
+	return 0;
+}
+
+int ldd_close(struct inode *inode, struct file *filp){
+	printk("close file\n");
+	return 0;
+}
+
+struct file_operations ldd_op = {
+	.owner = THIS_MODULE,
+	.open = ldd_open,
+	.read = ldd_read,
+	.write = ldd_write,
+	.release = ldd_close,
+};
+
+int ldd_init(void)
+{
+	if((alloc_chrdev_region(&dev,0,1,"ldd")) < 0){
+		printk("Failed to alloc chardev region\n");
+		return -1;	
+	}
+	cdev_init(&ldd_dev,&ldd_op);
+	if(cdev_add(&ldd_dev,dev,1) < 0){
+		printk("Failed to add chardev\n");
+		goto r_class;	
+	}
+	if((dev_class = class_create(THIS_MODULE,"ldd_class")) == NULL){
+		printk("Failed to create class\n");
+		goto r_class;		
+	}
+	if(device_create(dev_class,NULL,dev,NULL,"ldd_device") == NULL){
+		printk("Failed to craete");
+		goto r_device;
+	}
+	kobj_ref = kobject_create_and_add("ldd_sysyfs",kernel_kobj);
+	if(sysfs_create_file(kobj_ref,&ldd_attr.attr)){
+                printk(KERN_INFO"Cannot create sysfs file......\n");
+                goto r_sysfs;
+        }
+	return 0;
+r_sysfs:
+        kobject_put(kobj_ref); 
+        sysfs_remove_file(kernel_kobj, &ldd_attr.attr);
+ 
+r_device:
+        class_destroy(dev_class);
+r_class:
+        unregister_chrdev_region(dev,1);
+        cdev_del(&ldd_dev);   
+        return -1;
+}
+void ldd_exit(void){
+	kobject_put(kobj_ref); 
+        sysfs_remove_file(kernel_kobj, &ldd_attr.attr);
+        device_destroy(dev_class,dev);
+        class_destroy(dev_class);
+        cdev_del(&ldd_dev);
+        unregister_chrdev_region(dev, 1);
+}
+
+module_init(ldd_init);
+module_exit(ldd_exit);

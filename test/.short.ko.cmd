@@ -1,0 +1,1 @@
+cmd_/home/nesara/modules/test/short.ko := ld -r -m elf_x86_64  -z max-page-size=0x200000 -T ./scripts/module-common.lds --build-id  -o /home/nesara/modules/test/short.ko /home/nesara/modules/test/short.o /home/nesara/modules/test/short.mod.o

@@ -1,0 +1,222 @@
+#include <linux/init.h>
+#include <linux/kernel.h>
+#include <linux/module.h>
+#include <linux/kdev_t.h>
+#include <linux/slab.h>
+#include <linux/fs.h>
+#include <linux/cdev.h>
+#include <linux/interrupt.h>
+#include <asm/uaccess.h>
+#include <linux/wait.h>
+#include <linux/sched.h>
+
+#define MAX_SIZE 10
+DECLARE_WAIT_QUEUE_HEAD(read_q);
+
+dev_t dev = 0;
+static struct kmem_cache *lddc_cache;
+struct ldd_device {
+	struct ldd_device *head;
+	char *data;
+	struct ldd_device *tail;
+};
+struct ldd_device *ldd_chrdev;
+struct cdev ldd_dev;
+
+struct ldd_device *ldd_follow(void)
+{
+	int i=0;
+	struct ldd_device *ld;
+
+	if(!ldd_chrdev){
+		ldd_chrdev = kmalloc(sizeof(struct ldd_device), GFP_KERNEL);
+		if(!ldd_chrdev)
+			goto out;
+		ldd_chrdev->head = ldd_chrdev->tail = NULL;
+		ldd_chrdev->data = NULL;
+		printk("%s:Starting node created\n",__func__);
+		return ldd_chrdev;
+	}
+	ld = ldd_chrdev;
+	while(ld->tail){
+		printk("Node:%d\n",i++);
+		ld = ld->tail;
+	}	
+	return ld;
+out:
+	printk("%s:Alloc memory failed\n",__func__);
+	return NULL;
+}
+
+struct ldd_device *ldd_create_node(struct ldd_device *ld)
+{
+	struct ldd_device *temp;
+
+	temp = kmalloc(sizeof(struct ldd_device), GFP_KERNEL);
+	if(!temp){
+		printk("%s:Alloc memory failed\n",__func__);
+		return NULL;
+	}
+	ld->tail = temp;		
+	temp->head = ld;
+	temp->tail = NULL;
+	printk("%s:Create node\n",__func__);
+	return temp;
+}
+
+void ldd_free_node(struct ldd_device *ld)
+{
+	struct ldd_device *temp;
+	if(ld->head != NULL){
+		temp = ld->head;
+		kmem_cache_free(lddc_cache, ld->data);
+		kfree(ld);
+		temp->tail = NULL;
+		printk("Freed node\n");
+	}
+}
+void ldd_destory(void)
+{
+	struct ldd_device *temp,*ld = ldd_follow();
+	printk("Pruning nodes\n");
+	while(ld->head){
+		temp = ld;
+		ld = ld->head;
+		ldd_free_node(temp);		
+	}
+	kfree(ld);
+}
+int ldd_open(struct inode *inode, struct file *filp)
+{
+	printk("Open file\n");
+	filp->private_data = ldd_follow();
+	return nonseekable_open(inode, filp);
+}
+
+int is_free(struct ldd_device *ld)
+{
+	while(ld->tail)
+		ld = ld->tail;
+	if(ld->data == NULL)
+		return 0;
+	return 1;
+}
+
+ssize_t ldd_read(struct file *filp, char __user *buf, size_t count, loff_t *offset)
+{
+	int retval = 0;
+	struct ldd_device *ld = filp->private_data;
+
+	while(ld->head == NULL){
+		if(filp->f_flags & O_NONBLOCK)
+			return -EAGAIN;
+		printk("%s:No data to read\n",__func__);
+		if(wait_event_interruptible(read_q, is_free(ld)))
+			return -ERESTARTSYS;
+		printk("Waking up\n");
+	}
+	if(ld->tail != NULL)
+		ld = ld->tail;
+	if(!ld->data)
+		goto out;
+	printk("Read file\n");
+	if(count > MAX_SIZE)
+		count = MAX_SIZE;
+	if(copy_to_user(buf,ld->data,count)){
+		retval = -EFAULT;
+		goto out;	
+	}
+	printk("%s\n",ld->data);
+	//Delete current node in FILO manner
+	ldd_free_node(ld);
+	return 0;
+out:
+	return retval;
+}
+
+ssize_t ldd_write(struct file *filp, const char __user *buf, size_t count, loff_t *offset)
+{
+	int err=0,retval = 0;
+	struct ldd_device *ld = filp->private_data;
+	printk("Write file\n");
+	//Return new node
+	ld = ldd_create_node(ld);
+	if(!ld){
+		printk("Failed to create node\n");
+		goto alloc_f;
+	}
+	
+	//alloc new data cache area for write
+	ld->data = kmem_cache_alloc(lddc_cache, GFP_KERNEL);
+	if(!ld->data){
+		printk("%s:Failed to alloc cache\n",__func__);
+		goto cache_f;	
+	}
+	if(count > MAX_SIZE)
+		count = MAX_SIZE;
+	err = copy_from_user(ld->data, buf, count);
+	if(err) {
+		retval = -EFAULT;
+		printk(KERN_INFO"could not write %d bytes\n",err);
+		goto cache_f;
+	}
+	printk("Waking up pending read\n");
+	wake_up_interruptible(&read_q);
+	return count;
+cache_f:
+	ldd_free_node(ld);
+alloc_f:
+	return -ENOMEM;
+}
+
+int ldd_close(struct inode *inode, struct file *filp){
+	printk("close file\n");
+	return 0;
+}
+
+struct file_operations ldd_op = {
+	.owner = THIS_MODULE,
+	.open = ldd_open,
+	.read = ldd_read,
+	.write = ldd_write,
+	.release = ldd_close,
+};
+
+int ldd_init(void)
+{
+	int retval = 0, err= 0;
+	dev = MKDEV(240,0);
+	if((register_chrdev_region(dev,1,"ldd")) < 0){
+		printk("Failed to alloc chardev region\n");
+		return -1;	
+	}
+	cdev_init(&ldd_dev,&ldd_op);
+	err = cdev_add(&ldd_dev,dev,1);
+	if( err < 0){
+		printk("Failed to add chardev\n");
+		goto out;	
+	}
+	lddc_cache = kmem_cache_create("ldd",MAX_SIZE * sizeof(char),0,
+			SLAB_HWCACHE_ALIGN ,NULL);
+	if(!lddc_cache)
+		goto f_cache;
+	printk("Init done\n");
+	return 0;
+f_cache:
+	printk("Failed to setup cache\n");
+out:
+	cdev_del(&ldd_dev);
+	unregister_chrdev_region(dev,1);
+	return retval;
+}
+
+void ldd_exit(void){
+	ldd_destory();
+	kmem_cache_destroy(lddc_cache);
+	cdev_del(&ldd_dev);
+	unregister_chrdev_region(dev,1);
+}
+
+MODULE_LICENSE("Dual BSD/GPL");
+module_init(ldd_init);
+module_exit(ldd_exit);
